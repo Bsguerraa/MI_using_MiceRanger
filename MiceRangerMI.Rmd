@@ -1,0 +1,122 @@
+---
+title: "Multiple Imputation using miceRANGER"
+author: "Bruno Siegel Guerra"
+date: "3/29/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(finalfit) 
+library(ggplot2)
+library(mice)
+library(mi)
+library(naniar)
+library(visdat)
+library(miceRanger)
+library(tidyr)
+library(dplyr)
+```
+
+# Remove Outliers e transformações de dados laboratoriais que não estão na mesma métrica
+Eu obtive melhores resultados trabalhando com um máximo de 50% de dados faltantes - mais do que isso a imputação ainda funciona, contudo a performance do modelo cai bastante.
+```{r}
+remove_outliers <- function(x, na.rm = TRUE, ...) {
+  qnt <- quantile(x, probs=c(.25, .75), na.rm = na.rm, ...)
+  H <- 2 * IQR(x, na.rm = na.rm)
+  y <- x
+  y[x < (qnt[1] - H)] <- NA
+  y[x > (qnt[2] + H)] <- NA
+  y
+}
+outliers_filters <- c('age', 'creatinina', 'pcr',
+                      'leucocitos','hemoglobina','plaquetas','sodio','potassio')
+## Multiply all values in variables that are not in the same scale ##
+df <- df %>% 
+  mutate(plaquetas = ifelse(plaquetas < 1000, plaquetas * 1000,plaquetas))
+df <- df %>% 
+  mutate(leucocitos = ifelse(leucocitos < 1000, leucocitos * 1000,leucocitos))
+
+### Filter all columns by 2*IQR ###
+df <- df %>%
+  mutate(across(c(outliers_filters), remove_outliers))
+hist(df$leucocitos)
+
+df$death <- as.factor(df$death)
+df$ICU <- as.factor(df$ICU)
+```
+
+# Overview of missing data
+Verificar como se da distribuição dos dados faltantes. Essa etapa é essencial para diferencias entre MCAR, MAR e MNAR.
+```{r}
+df %>% 
+  ff_glimpse()
+vis_dat(df)
+vis_miss(df, sort_miss = TRUE)
+```
+
+#Death and ICU as predictors,
+Verifique como os preditores se comportam entre os dados faltantes, pois pode ser necessario adicionar algum deles no processo de imputação, ou até remover. Se houver uma correlação clara entre os dados faltantes e a algum dos desfecho, não deixe de incluir no modelo de imputação.
+```{r, results='hide'}
+df <- df %>% 
+  mutate(death_OR_ICU = ifelse(death == TRUE | ICU == TRUE, 1,0))
+VD <- c("death_OR_ICU")
+VI <- c('age','wscore', 'creatinina', 'pcr','leucocitos','hemoglobina','plaquetas','sodio','potassio',
+        'gender','alert', 'healthcare_plan','death','ICU')
+plot1 <- df %>%
+  missing_pairs(VD,VI, position = "fill", )
+VI <- c('age','wscore', 'creatinina', 'pcr','leucocitos','hemoglobina','plaquetas','sodio','potassio',
+        'gender','alert', 'healthcare_plan')
+df %>%
+  missing_compare(VD,VI) %>%
+  knitr::kable(row.names=FALSE, align = c("l", "l", "r", "r", "r"))
+```
+
+
+# Missing data for Outcomes
+Caso algum dos dados faltantes tenha relação clara com o Outcome de interesse, ou ainda apresentar algum motivo extra para os dados estarem missing, talvez o padrão seja MNAR - Caso isso seja verdadeiro, não é possivel aplicar o processo de MI presente aqui nesse script. 
+```{r}
+gg_miss_var(df, facet = death, show_pct = TRUE) + labs(y = "Death")
+gg_miss_var(df, facet = healthcare_plan, show_pct = TRUE) + labs(y = "Healthcare_plan")
+gg_miss_var(df, facet = ICU, show_pct = TRUE) + labs(y = "ICU")
+```
+
+# Drawning the ShadowMatrix
+Desenha uma ShadowMatrix (package naniar) para entender melhor como os dados se comportam entre Missing e não Missing, recomendo explorar as funcionalidades do package para entender melhor como desenhar o modelo ou como os dados estão faltantes.
+```{r}
+df_shadow <- as_shadow(df)
+df_shadow_final <- bind_shadow(df)
+ggplot(df_shadow_final,
+       aes(x = sodio,
+           colour = ICU)) +
+  geom_density()
+```
+
+# General Imputation - 
+Parametros principais para cuidar:
+maxiters = Adiciona número de interações (Relevante - utilizar entre 5-15);
+m = Número de data-sets que ira produzir ao final do processo (5 é suficiente);
+num.threads = Se deseja deixar o processo mais rápido pelo numero de processadores;
+valueSelector = Utilize "meanMatch" caso seja uma variavel: Bimodal/Skewed ou valor Inteiro;
+```{r}
+df_imp <- miceRanger(df, m=6,returnModels = TRUE)
+saveRDS(df_imp, file = "1stMICE.rds",compress = TRUE)
+dataList <- completeData(df_imp)
+```
+
+# General Diagnosis plots - 
+Distribuição dos dados imputatos - Verifique se após imputação dados em preto estão parecidos com a linha em vermelho (muito importante);
+Erro de modelo - Verifica como o erro se comportou ao longo das interações (muito importante)
+Correlação entre data-sets - Verifique se existe uma correlação entre as interações (importante);
+Importancia da variantes no modelo - Verifique quais variaveis impactaram mais no modelo (importante);
+Variação na imputação entre os data-sets e os dados orignais - Serve para verificar o quão distantes os dados ficaram entre o data-set e a imputação (pouco importante);
+```{r}
+plotDistributions(df_imp,vars=c('creatinina',"pcr","leucocitos","hemoglobina","plaquetas","sodio","potassio"))
+plotCorrelations(df_imp,vars=c('creatinina',"pcr","leucocitos","hemoglobina","plaquetas","sodio","potassio"))
+plotModelError(df_imp,vars=c('creatinina',"pcr","leucocitos","hemoglobina","plaquetas","sodio","potassio"))
+plotVarImportance(df_imp)
+plotImputationVariance(df_imp,ncol=2,widths=c(5,3),vars=c('creatinina',"pcr","leucocitos","hemoglobina","plaquetas","sodio","potassio"))
+```
+
+
+
+
